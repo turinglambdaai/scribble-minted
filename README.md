@@ -38,4 +38,8 @@ See pretty code!
 ## Install
 `raco pkg install scribble-minted`
 
-You must have `pygmentize` installed and in your `PATH`.
+Install [Pygments](https://pygments.org/) to get syntax highlighting:
+`pygmentize` must be installed and in your `PATH` (or set the
+`current-pygmentize-path` parameter to its location). Without it,
+documents still build, but code is rendered as plain unhighlighted
+text (with a warning).
