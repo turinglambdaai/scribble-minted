@@ -55,10 +55,18 @@
   (findf (lambda (x) (and (pair? x) (equal? (car x) key)))
          als))
 
-(define pygmentize-bin
+;; Resolved lazily so that loading this module and building documents
+;; never requires pygmentize; documents that use `minted` render
+;; without highlighting when it is missing (see `plain-code-element`).
+(define (find-pygmentize-bin)
   (or (current-pygmentize-path)
-      (find-executable-path "pygmentize")
-      (error "Could not find pygmentize in path; try setting current-pygmentize-path manually.")))
+      (find-executable-path "pygmentize")))
+
+(define warned-no-pygmentize? #f)
+(define (warn-no-pygmentize)
+  (unless warned-no-pygmentize?
+    (set! warned-no-pygmentize? #t)
+    (eprintf "scribble/minted: could not find pygmentize in path; rendering code without syntax highlighting (set current-pygmentize-path to enable it)\n")))
 
 ;; Not needed at all any more, I think.
 (define minted-style-props
@@ -93,7 +101,7 @@
                (with-output-to-file pygmentize-style-file
                  (thunk
                   ; format is polymorphic to-string
-                  (system*-maybe pygmentize-bin "-S" (format "~a" style)
+                  (system*-maybe (find-pygmentize-bin) "-S" (format "~a" style)
                                  "-f" pygmentize-format
                                  ; Use style name as an extra CSS selector to
                                  ; support multiple styles in HTML
@@ -130,7 +138,7 @@
          (thunk
           (apply
            system*-maybe
-           pygmentize-bin
+           (find-pygmentize-bin)
            "-l"
            (cdr (maybe-assoc 'lang (style-properties style)))
            "-f"
@@ -142,52 +150,84 @@
                  ls
                  (list* "-O" (format "~a=~a" (car p) (cdr p)) ls))))))))))
 
-(define (minted-element s contents)
+(define (html-escape s)
+  (apply string-append
+         (for/list ([c (in-string s)])
+           (case c
+             [(#\&) "&amp;"] [(#\<) "&lt;"] [(#\>) "&gt;"]
+             [else (string c)]))))
+
+;; Renders code as plain, unhighlighted text when pygmentize is unavailable,
+;; keeping the same block/inline structure as the highlighted output.
+(define (plain-code-element s contents)
+  (define text (string-join contents ""))
   (cond-element
    [html
-    (let* ([style (make-style
-                  (style-name s)
-                  (cons
-                   (make-minted-style-file-addition 'html s)
-                   (style-properties s)))]
-           [output (render-pygmentize "html" style contents)])
-      (element
-       (make-style
-        #f
-        (list*
-         #;(list (string->xexpr ...))
-         (make-minted-style-file-addition 'html s)
-         (xexpr-property
-          (cdata #f #f (if (equal? (style-name style) "ScrbMintInline")
-                           ;; NB: Inline is not wrapped from pygments to avoid extra paragraphs.
-                           ;; Instead, wrap it code manually.
-                           ;; Would prefer to use <pre>, but this seems
-                           ;; to prevent Scribble from folding it into the previous paragraph.
-                           ;; Instead, highlight-inline asks CSS to do white-space: pre.
-                           ;; Not sure how compatible this is with older browsers
-                           (format "<code class=\"highlight-inline\">~a</code>"
-                                   ;; Remove trailing <br /> for inline
-                                   (string-trim output "<br />" #:left? #f))
-                           output))
-          (cdata #f #f ""))
-         minted-style-props))
-       ""))]
+    (define marked-up
+      (if (equal? (style-name s) "ScrbMintInline")
+          (format "<code class=\"highlight-inline\">~a</code>" (html-escape text))
+          (format "<pre class=\"~a\">~a</pre>" (style-name s) (html-escape text))))
+    (element
+     (make-style #f (list (xexpr-property (cdata #f #f marked-up) (cdata #f #f ""))))
+     "")]
    [(or latex pdf)
-    (let ([style (make-style
-                  (style-name s)
-                  (cons
-                   (make-minted-style-file-addition 'latex s)
-                   (style-properties s)))])
-      (render-element
-       (make-style
-        #f
-        (cons
-         (make-minted-style-file-addition 'latex s)
-         minted-style-props))
-       ""
-       (lambda (renderer part ri)
-         (printf (render-pygmentize "latex" style contents))
-         null)))]))
+    (render-element
+     (make-style #f '())
+     ""
+     (lambda (renderer part ri)
+       (printf "\\begin{verbatim}~a\\end{verbatim}" text)
+       null))]))
+
+(define (minted-element s contents)
+  (if (find-pygmentize-bin)
+      (cond-element
+       [html
+        (let* ([style (make-style
+                      (style-name s)
+                      (cons
+                       (make-minted-style-file-addition 'html s)
+                       (style-properties s)))]
+               [output (render-pygmentize "html" style contents)])
+          (element
+           (make-style
+            #f
+            (list*
+             #;(list (string->xexpr ...))
+             (make-minted-style-file-addition 'html s)
+             (xexpr-property
+              (cdata #f #f (if (equal? (style-name style) "ScrbMintInline")
+                               ;; NB: Inline is not wrapped from pygments to avoid extra paragraphs.
+                               ;; Instead, wrap it code manually.
+                               ;; Would prefer to use <pre>, but this seems
+                               ;; to prevent Scribble from folding it into the previous paragraph.
+                               ;; Instead the highlight-inline asks CSS to do white-space: pre.
+                               ;; Not sure how compatible this is with older browsers
+                               (format "<code class=\"highlight-inline\">~a</code>"
+                                       ;; Remove trailing <br /> for inline
+                                       (string-trim output "<br />" #:left? #f))
+                               output))
+              (cdata #f #f ""))
+             minted-style-props))
+           ""))]
+       [(or latex pdf)
+        (let ([style (make-style
+                      (style-name s)
+                      (cons
+                       (make-minted-style-file-addition 'latex s)
+                       (style-properties s)))])
+          (render-element
+           (make-style
+            #f
+            (cons
+             (make-minted-style-file-addition 'latex s)
+             minted-style-props))
+           ""
+           (lambda (renderer part ri)
+             (printf (render-pygmentize "latex" style contents))
+             null)))])
+      (begin
+        (warn-no-pygmentize)
+        (plain-code-element s contents))))
 
 (define (minted lang #:options [options '()] . code)
   ;; Wrap in extra style selector
